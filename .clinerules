@@ -1,0 +1,247 @@
+version: 1
+
+rules:
+  # 1. Minimal system prompt (includes instruction for explanation files)
+  - id: minimal_system_prompt
+    match:
+      scope: global
+    actions:
+      - type: set_system_prompt
+        value: >
+          You are a concise coding assistant. Prefer short answers, minimal
+          prose, and only essential explanations. Expand only when the user
+          explicitly asks (e.g., "explain", "teach", "plan", or requests files).
+          When generating explanation markdown files (.md), do not include code
+          snippets; only list class names and method names for reference.
+          IMPORTANT: Treat explanation/documentation .md files (e.g.
+          explanations.md) as a SECOND PASS. First complete all core coding
+          work (Java source files, compilation, verification), and only after
+          the core task is finished and verified should you generate the .md
+          files. Spend tokens on code first, documentation last.
+
+  # 2. Context limits (slightly larger history for planning)
+  - id: context_limits
+    match:
+      scope: global
+    actions:
+      - type: set_max_context_tokens
+        value: 4096
+      - type: set_max_history_messages
+        value: 10          # increased from 6
+      - type: set_max_files_in_context
+        value: 6
+
+  # 3. Exclude build and IDE directories
+  - id: ignore_build_dirs
+    match:
+      scope: project
+    actions:
+      - type: exclude_paths
+        value:
+          - target/
+          - .idea/
+          - .vscode/
+          - node_modules/
+          - build/
+          - out/
+          - logs/
+          - .git/
+
+  # 4. Prefer diffs over full files
+  - id: prefer_diffs
+    match:
+      scope: global
+    actions:
+      - type: set_prefer_diffs
+        value: true
+
+  # 5. Avoid auto-running tools unless requested
+  - id: no_auto_tools
+    match:
+      scope: global
+    actions:
+      - type: set_auto_run_tools
+        value: false
+
+  # 6. Default output token cap (low), raised for heavy tasks
+  - id: default_output_tokens
+    match:
+      scope: global
+    actions:
+      - type: set_max_output_tokens
+        value: 512
+
+  # 7. Only load Java source directories by default
+  - id: java_source_focus
+    match:
+      scope: project
+    actions:
+      - type: include_paths
+        value:
+          - src/main/java/
+          - src/main/resources/
+          - src/test/java/
+
+  # 8. Auto-ignore Markdown files UNLESS the user asks to read/view them
+  - id: ignore_markdown_default
+    match:
+      scope: file
+      when:
+        - type: file_extension_is
+          value: ".md"
+        - type: not
+          value:
+            any:
+              - type: message_contains
+                value: "read"
+              - type: message_contains
+                value: "show"
+              - type: message_contains
+                value: "explanation"
+              - type: message_references_file   # pseudo, if your agent supports this
+    actions:
+      - type: exclude_file_from_context
+
+  # 9. Auto-ignore JSON/YAML configs (unconditional – saves tokens)
+  - id: ignore_json_yaml_default
+    match:
+      scope: file
+      when:
+        - type: file_extension_is
+          value: ".json"
+        - type: file_extension_is
+          value: ".yaml"
+        - type: file_extension_is
+          value: ".yml"
+    actions:
+      - type: exclude_file_from_context
+
+  # 10. High output limit + verbosity for plans, generation, explanations
+  - id: raise_output_for_heavy_tasks
+    match:
+      scope: message
+      when:
+        any:
+          - type: message_contains
+            value: "plan"
+          - type: message_contains
+            value: "generate"
+          - type: message_contains
+            value: "create project"
+          - type: message_contains
+            value: "explain"
+          - type: message_contains
+            value: "teach"
+          - type: message_contains
+            value: "explanation"
+    actions:
+      - type: set_max_output_tokens
+        value: 3072
+      - type: set_style
+        value:
+          verbosity: high
+          include_rationale: true
+
+  # 11. Learning mode (kept, now redundant with rule 10 but fine)
+  - id: learning_mode_toggle
+    match:
+      scope: message
+      when:
+        - type: message_contains
+          value: "teach"
+        - type: message_contains
+          value: "explain"
+    actions:
+      - type: set_style
+        value:
+          verbosity: high
+          include_rationale: true
+      - type: set_learning_mode
+        value: true
+
+  # 12. Generated .md files go to a docs/ folder (not /resources)
+  - id: markdown_output_location
+    match:
+      scope: message
+      when:
+        - type: message_contains
+          value: ".md"
+    actions:
+      - type: set_generated_file_directory
+        value: "docs/"
+
+  # 13. Terse default style (overridden by heavy-task rules)
+  - id: terse_default
+    match:
+      scope: global
+    actions:
+      - type: set_style
+        value:
+          verbosity: low
+          include_rationale: false
+
+  # 14. Token priority: core task first, .md documentation last
+  - id: defer_markdown_until_core_done
+    match:
+      scope: global
+    actions:
+      - type: set_task_priority
+        value:
+          first:
+            - "Challenge.java implementation"
+            - "solution/Solution.java implementation"
+            - "helper class .java files (one class per file)"
+            - "compile and verify (mvnw compile, run Solution mains)"
+          last:
+            - "explanations.md per challenge"
+            - "docs/*.md documentation files"
+      - type: set_generation_order
+        value: >
+          Within a batch, create ALL Java source files for the batch first,
+          compile, and fix errors. Only when the batch compiles cleanly and
+          solutions are verified should explanations.md files be generated
+          for that batch. If the token budget is running low, skip the .md
+          files entirely and note which challenges still need their
+          explanations.md - they can be generated in a later session.
+      - type: set_system_prompt_addendum
+        value: >
+          Do NOT interleave explanations.md creation with Java file creation.
+          Code first, documentation last. 
+  # 15. Always give production-system solutions, regardless of project scale 
+  - id: always_production_style_solutions 
+    match: 
+      scope: global 
+    actions: 
+      - type: set_system_prompt_addendum 
+        value: | 
+          ALWAYS provide solutions the way real production systems do, and 
+          explain the production reasoning. Never suggest a simplified, 
+          learning-only, or toy approach just because the current project is 
+          small or a demo. Even for clean/lab/demo projects, prefer the 
+          patterns, libraries, configuration, and error handling used in 
+          shipped, high-load services. Call out explicitly when a simpler 
+          shortcut would NOT be production-safe. 
+
+  # 16. Incremental line-by-line teaching
+  - id: incremental_teaching
+    match:
+      scope: message
+      when:
+        any:
+          - type: message_contains
+            value: teach
+          - type: message_contains
+            value: explain
+    actions:
+      - type: set_style
+        value:
+          verbosity: high
+          include_rationale: true
+      - type: set_system_prompt_addendum
+        value: >
+          Teach incrementally: one small concept or code change at a time, no
+          information dumps. Explain each line of code shown (its purpose and
+          what it does). Give a small runnable example, then stop and wait for
+          user confirmation before the next step. After asking the user to do
+          something, verify it yourself when possible by reading the files and
+          running the tests.
